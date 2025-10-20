@@ -1,0 +1,298 @@
+---
+title: "SVD Word Embedding for Analogy Tasks"
+output: html_document
+date: "2024-02-18"
+author: "Diego Urdapilleta de la Parra"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+In natural language processing (NLP), a word embedding is a mapping between words and vector representations. Each numeric vector assigned to a word is meant to capture certain semantic properties of its word, and the vector space in which these vectors live has different semantic regions as a result.
+In this mini-project, I will build a word embedding using Singular Value Decomposition (SVD) that is capable of solving analogy tasks. To this end, we start with a co-ocurrence matrix of the 10,000 most frequent words in the English Wikipedia Corpus. For every possible pair of words in the sample, the co-ocurrance matrix contains the number of times the two words appear within a 5-word range of each other. This is a good measure of how related words are to each other, and we will hopefully leverage these co-ocurrances to learn semantic properties of the vocabulary.
+
+The co-ocurrences may be biased by the frequency of the words. That is, a word with a higher absolute frequency will potentially have higher co-ocurrences with other words. For this reason, we start by importing and normalizing the data.
+```{r include=FALSE}
+load("svd_saved.RData")
+library(tidyverse)
+```
+
+```{r eval=FALSE}
+library(tidyverse)
+cooccur <- read.csv("data/co_occur.csv", header = FALSE)
+dictionary <- read.csv("data/dictionary.txt", header = FALSE)$V1
+
+M_scaled <- apply(cooccur, 1:2, \(x) log(1 + x, base = exp(1)))
+```
+```{r}
+M_scaled[1:8, 1:8]
+```
+
+Singular Value Decomposition (SVD) is useful to decompose the normalized co-ocurrence matrix into three separate matrices. Let us denote the normalize co-ocurrence matrix by $M$ and its SVD by $M=U\Sigma V^{\top}$. Then, a few important things are satisfied:
+1. Since $M$ is symmetric by construction, the left and right singular vectors (columns of $U$ and $V$, respectively) are the same.
+2. By virtue of the decomposition $U\Sigma V^{\top}$, each singular vector $v_i$ has 10,000 coordinates with can be interpreted to correspond to the 10,000 words. Thus, each singular vector captures certain semantic information, with higher-valued coordinates corresponding to semantically relevant words.
+3. Finally, SVD allows us to potentially construct a low-rank approximation $U_{[100]}\Sigma_{[100]}V^{\top}_{[100]}$ of our matrix $M$, which will make computations easier.
+
+We begin by obtaining the SVD of $M$ and constructing its 100-rank approximation.
+
+
+```{r eval=FALSE}
+# SVD:
+svd_M <- svd(M_scaled, nu = 100, nv = 100)
+
+s_values <- svd_M$d
+right_s_vectors <- svd_M$u
+rownames(right_s_vectors) <- dictionary
+left_s_vectors <- svd_M$v
+rownames(left_s_vectors) <- dictionary
+
+# Compute the approximation:
+M_approx <- right_s_vectors %*% diag(s_values) %*% t(left_s_vectors)
+```
+```{r}
+M_approx[1:8, 1:8]
+
+plot(s_values)
+
+s_values[1:20]
+```
+
+As can be seen in the plot, the first few singular values are much larger than the rest. This tells us that $M$ is well approximated by a low-rank matrix. In particular, we will use a rank 100 approximation which results in a 100-dimensional vector space were our word embeddings live. In what follows, we will explore this 100-dimensional word space and see if we can find semantic regions and semantic information captured by the singular vectors. 
+
+## Examining Some Examples
+
+We take the absolute value of the singular vectors, extract the top 10 highest entry values, and map them to their associated word.
+```{r}
+# Create empty matrices to store the top words of each vector.
+pos_top_words <- matrix(rep(0, 10*100), nrow = 10)
+neg_top_words <- matrix(rep(0, 10*100), nrow = 10)
+colnames(pos_top_words) <- paste("v", 1:100, sep = "")
+colnames(neg_top_words) <- paste("v", 1:100, sep = "")
+
+# Fill the matrix with a loop.
+for(i in 1:100){
+  # We sort each vector and extract the first 10 row names.
+  pos_top_words[,i] <- names(sort(right_s_vectors[, i], decreasing = TRUE))[1:10]
+  neg_top_words[,i] <- names(sort(right_s_vectors[, i], decreasing = FALSE))[1:10]
+}
+
+pos_top_words[, 1:6]
+neg_top_words[, 1:6]
+```
+This way, we can get an idea about the general semantic region that each vector is pointing at. I will not include the output for the whole 100 singular vectors here. However, in the small sample above we can already identify interesting sets of words relating to, for example, names in vector 3, politics in vector 5, and technology or warfare in vector 6.
+
+We will examine, as examples, singular vectors 10, 35, 48, 60, and 97. We can again retrieve the top ten positive and top ten negative values using the same matrices as above:
+```{r}
+example_vectors <- c(10, 35, 48, 60, 97)
+pos_top_words[, example_vectors]
+neg_top_words[, example_vectors]
+
+```
+We can see that each of these vectors roughly capture the following semantic regions:
+\begin{center}
+    \begin{tabular}{c|c|c}
+        \textbf{Vector} & \textbf{Positive values interpretation} & \textbf{Negative values interpretation}\\
+        \hline
+        10 & School and student life & Warfare (weak)\\
+        35 & Nationalities & -\\
+        48 & Television and film & Politics (weak) \\
+        60 & - & Religion\\
+        88 & Numbers & Pronouns (weak)\\
+    \end{tabular}
+\end{center}
+(I typed a dash (-) in those cases where making an interpretation is harder.)
+
+There appears to be a sharp distinction between the semantic regions of the top positive words and the top negative words for each vector, with one of the two being generally more definite than the other. In vector 60, for instance, it is easy to see that the words corresponding to the top negative values are very strongly related to each other, while the relationship seems to be weaker among those of the largest positive values. For vector 10, however, both the top positive values and the top negative values are semantically cohesive, but mutually quite different.
+
+## Finding the Location of Words in the Space
+
+In this section, we will examine the "location" of some interesting words in our embedding space. Specifically, we will look at the words "boy", "girl", "brother", "sister", "king", "queen", "he", "she", "John", "Mary", "wall", and "tree" in the hopes of identifying directions and regions related to gender.
+
+```{r}
+# Normalize the rows of the singular vector matrix
+vectors <- t(apply(right_s_vectors, 1, function(x){x / norm(x, "2")}))
+rownames(vectors) <- dictionary
+```
+(Note: while assigning `vectors` (which represents the matrix $V$), we had to take the transpose with `t()` because, although our inputs were matrix rows, the `apply` function always outputs matrix columns. )
+
+```{r}
+V_1 <- vectors["woman",]
+V_2 <- vectors["man",]
+V <- V_1 - V_2
+```
+Since each row vector $v$ of ${V}$ is a unit vector, the scalar projection of $u$ over $v$ for any $u\in\R^{100}$ is simply given by the dot product $u^{\top}v$. Let $U_{\text{boy}}, U_{\text{girl}}, U_{\text{brother}}, \ldots\in\R^{100}$ be the word embeddings for the indexed words. We can get the projections $U_i^{\top}V$ through the following matrix product:
+$$
+\begin{bmatrix}
+  - & U_{\text{boy}}^{\top} & - \\[2mm]
+  - & U_{\text{girl}}^{\top} & - \\[2mm]
+  - & U_{\text{brother}}^{\top} & - \\[2mm]
+  & \vdots &\\[2mm]
+  - & U_{\text{tree}}^{\top} & - \\[2mm]
+\end{bmatrix} V = \begin{bmatrix}
+  - & U_{\text{boy}}^{\top}V & - \\[2mm]
+  - & U_{\text{girl}}^{\top}V & - \\[2mm]
+  - & U_{\text{brother}}^{\top}V & - \\[2mm]
+  & \vdots &\\[2mm]
+  - & U_{\text{tree}}^{\top}V & - \\[2mm]
+\end{bmatrix}.
+$$
+
+Note that the matrix used in the left-hand side is simply a submatrix of ${V}$. We take advantage of this in the following code lines.
+```{r}
+words <- c("boy", "girl", "brother", "sister", "king", "queen", "he", "she",
+           "john", "mary", "wall", "tree")
+indices <- which(dictionary %in% words)
+
+# This step is necessary to ensure that both indices and words are in the same
+# corresponding order
+words <- rownames(vectors[indices, ])
+
+projections_V <- vectors[indices, ] %*% V
+
+proj_tibble <- tibble(words, projections_V)
+
+proj_tibble %>% 
+  ggplot(aes(x = words, y = projections_V)) + 
+  geom_col(fill = "#009E73") + 
+  labs(y = "Projections", x = "Words")
+```
+
+
+We can see that words associated with masculine figures have negative values while those associated with feminine figures have positive values. This implies that vectors representing masculine-associated words are closer to the word embedding for "man" ($V_2$), while vectors representing feminine-associated words are closer to that of "woman" ($V_1$). The following diagram illustrates this:
+\begin{center}
+\begin{tikzpicture}
+    \draw[thin, dashed, ->] (-4,0) -- (4,0);
+    \draw[thin, dashed, ->] (0,-1.3) -- (0,4);
+    \draw[ultra thick, ->] (0,0) -- (-0.5*3,0.866*3) node[above] {$V_2$};
+    \draw[ultra thick, ->] (0,0) -- (0.5*3,0.866*3) node[above] {$V_1$};
+    \draw[ultra thick, ->] (0,0) -- (3,0) node[below] {$V_1 - V_2$};
+    \draw[ultra thick, ->] (0,0) -- (0.93, 2.85) node[above] {$U_f$};
+    \draw[ultra thick, ->] (0,0) -- (-2.43, 1.76) node[above] {$U_m$};
+    \draw[ultra thick, color=red, ->] (0,0) -- (0.93, 0) node[below] {$\operatorname{proj}_{V}(U_f)$};
+    \draw[ultra thick, color=red, ->] (0,0) -- (-2.43, 0) node[above] {$\operatorname{proj}_{V}(U_m)$};
+    \draw[dashed, color=red] (0.93, 0) -- (0.93, 2.85);
+    \draw[dashed, color=red] (-2.43, 0) -- (-2.43, 1.76);
+\end{tikzpicture}
+\end{center}
+where $U_f$ and $U_m$ represent the embeddings of feminine-associated and masculine-associated words, respectively. It makes sense that words like "tree" and "wall", which are not generally gendered, lie close to the space of points equidistant from $V_1$ and $V_2$ (although, interestingly, the word "wall" seems to lean more towards the masculine side).
+
+Now consider the words "math", "matrix", "history", "nurse", "doctor", "pilot", "teacher", "engineer", "science", "arts", "literature", "Bob", and "Alice." Using the same procedure as above, we have:
+```{r}
+words <- c("math", "matrix", "history", "nurse", "doctor", "pilot", "teacher", 
+           "engineer", "science", "arts", "literature", "bob", "alice")
+indices <- which(dictionary %in% words)
+
+# This step is necessary to ensure that both indices and words are in the same 
+# corresponding order.
+words <- rownames(vectors[indices, ])
+
+projections_V <- vectors[indices, ] %*% V
+
+proj_tibble <- tibble(words, projections_V)
+
+proj_tibble %>% 
+  ggplot(aes(x = words, y = projections_V)) + 
+  geom_col(fill = "#009E73") + 
+  labs(y = "Projections", x = "Words") + 
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust=1))
+```
+
+
+These results reflect underlying occupational and educational gender biases that exist within the English Wikipedia Corpus. In the real world, we may be able to identify the political and social factors that bring upon these biases and attempt to mitigate them. This word-embeddings model, however, cannot make such a judgement and will simply associate certain occupations with one gender or the other. This is problematic because, in practice, decisions made using the model will carry and perpetuate undesirable gender roles.
+
+### Finding similarity between words
+
+A key step in identifying semantic regions is finding a way to measure "distance" between words. For word embeddings $v_{i}$ and $v_{j}$, we define their cosine similarity to be
+
+$$ d(v_{i}, v_{j}) = \frac{v_{i}^{\top}v_{j}}{||v_{i}||\,||v_{j}||},$$
+where $||\cdot||$ denotes the $l_{2}$ norm. Since our vectors are standardized, $||v_{i}|| = 1$ for all $i\in [10,000]$, so that $d(v_{i}, v_{j}) = {v_{i}^{\top}v_{j}}$. Below, we illustrate this distance measure by finding the words closest to "Montreal":
+
+
+```{r}
+d_montreal <- function(word){
+  vectors[word, ] %*% vectors["montreal", ]
+}
+
+similar_montreal <- sapply(dictionary, d_montreal) %>% 
+  sort(decreasing = TRUE) %>% 
+  names()
+
+similar_montreal[1:30]
+```
+We see that the top 30 closest word embeddings to "Montreal" represent city and province names, with Canadian cities being prevalent.
+
+## Solving Analogy Tasks
+
+Analogy tasks are questions of the form “man is to woman as king is to what?”. Using a trigonometric approach, we can navigate our embedding space to solve such tasks. Specifically, we would find the word closest to the vector $U_{\text{woman}} - U_{\text{man}} + U_{\text{king}}$. To test our embedding's performance on this type of tasks, the file `analogy_task.txt` contains close to 5,600 analogy tasks. The code below applies the embedding on this set.
+
+The function below solved the analogy task by computing the expression above. It then removes the words already involved in the analogy from the possible guesses. Finally, it obtains the $n$ closest words to the analogy solution vector.
+```{r}
+solve_analogy <- function(row_vector, n_of_guesses = 5){
+  v1 <- vectors[row_vector[1], ]
+  v2 <- vectors[row_vector[2], ]
+  v3 <- vectors[row_vector[3], ]
+  target <- v2 - v1 + v3
+  
+  # Obtain the indices for the chosen words and remove them from possible guesses
+  indices <- which(dictionary %in% c(row_vector[1], 
+                                     row_vector[2], 
+                                     row_vector[3])
+                   )
+  possible_vectors <- vectors[-indices, ]
+  
+  # Obtain the nearest word embeddings to the target:
+  distances <- apply(possible_vectors, 1, \(x) x %*% target)
+  result <- sort(distances, decreasing = TRUE) %>% names()
+  
+  result[1:n_of_guesses]
+}
+
+# Function for testing solve_analogy on rows of a dataset:
+test <- function(data, n = 1){
+  guesses <- apply(data, 1, solve_analogy, n_of_guesses = n)
+  
+  # For n>1, apply will return a matrix with a column output for each row input.
+  # We want to turn these column outputs back to rows, and we use t().
+  if(n>1){
+    guesses <- t(guesses)
+    colnames(guesses) <- paste("guess", 1:n, sep = "_")
+  }
+  
+  cbind(data, guesses)
+}
+```
+We can now apply these functions to `analogy_task.txt`.
+```{r}
+analogy_task <- read.csv("data/analogy_task.txt", header = FALSE, sep = " ")
+test(analogy_task[1:8, ], n=3)
+```
+The following line of code stores the output of applying `test` on the complete dataset:
+```{r eval=FALSE}
+test_results <- test(analogy_task, n = 5)
+```
+```{r}
+# Filter the results to obtain the rows where all five guesses were wrong:
+failed_tasks <- test_results %>% 
+  filter(!Reduce(`|`, lapply(select(., -V4), \(x) x == V4)))
+
+head(failed_tasks)
+dim(failed_tasks)
+dim(analogy_task)
+```
+There were 1,412 analogies for which the model's top five answers were incorrect. Considering that the total number of analogies provided was 5,585, the model guessed correctly $1 - 1,412/5,585 \approx 75\%$ of the time. Most guesses, however, are at least close in the type of word, conjugation, or general semantic region.
+
+Looking at the table for `failed_tasks`, there does not seem to be a particular type of analogy at which the model struggled most. However, I chose three that I found interesting:
+```{r}
+failed_tasks[c(902, 945, 1285),]
+```
+For the first analogy, \textit{bad is to worse as good is to better}, the model guessed \textit{reasonable}. In a way, this makes sense: in terms of quality, the step from \textit{bad} to \textit{worse} goes in the same direction as the step from \textit{good} to \textit{reasonable}. Both pairs denote a decrease in quality. The second example shown above follows a similar line of reasoning, I think. The model's guesses include \textit{largest, large, larger,} and \textit{huge}, all of which represent an increase in size from \textit{small}. The third example, however, is one where I think the model fails completely: its guesses are not even close to the correct answer, \textit{eyes}.
+
+Another recurring mistake I found occurs with analogies that refer to the English nationality:
+```{r}
+failed_tasks[c(1021, 1024, 1026, 1029, 1033, 1040, 1044, 1048, 1053), ]
+```
+Interestingly, the model's guesses were very close to the correct answer (referring to other nationalities in the UK) but failed to hit the right one. I think it is likely that the word embedding for "English" is heavily dominated by the language-related meaning of the word, hence removing it from the 100-dimensional "region" of nationalities. 
+
+Since all 10,000 word embeddings are being represented in a 100-dimensional space, there is simply not enough room for all vectors to be "spaced" and sorted in the most optimal way. Mistakes like the above are therefore bound to happen.
